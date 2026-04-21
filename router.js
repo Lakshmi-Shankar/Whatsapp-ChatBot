@@ -1,16 +1,19 @@
 import express from "express";
 import dotenv from "dotenv";
 import OpenAI from "openai";
+import fetch from "node-fetch";
 
 dotenv.config();
 
 const router = express.Router();
 
+// Groq client
 const client = new OpenAI({
   apiKey: process.env.GROQ_API_KEY,
   baseURL: "https://api.groq.com/openai/v1",
 });
 
+// Course context
 const COURSE_CONTEXT = `
 AI Academy Course:
 
@@ -29,6 +32,112 @@ Certificate available after completing all modules.
 Pricing: https://ai-academy.example.com/pricing
 `;
 
+
+// ============================
+// 🔹 AI RESPONSE FUNCTION
+// ============================
+async function getAIResponse(userMessage) {
+  const response = await client.chat.completions.create({
+    model: "llama-3.1-8b-instant",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are an AI Academy assistant. Answer ONLY using the provided context. If the answer is not in the context, say you don't know.",
+      },
+      {
+        role: "system",
+        content: COURSE_CONTEXT,
+      },
+      {
+        role: "user",
+        content: userMessage,
+      },
+    ],
+  });
+
+  return (
+    response.choices?.[0]?.message?.content ||
+    "I’m not sure based on available information."
+  );
+}
+
+
+// ============================
+// 🔹 SEND MESSAGE (WHAPI)
+// ============================
+async function sendMessage(to, message) {
+  try {
+    await fetch("https://gate.whapi.cloud/messages/text", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.WHAPI_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        to: to,
+        body: message,
+      }),
+    });
+  } catch (err) {
+    console.error("Whapi send error:", err);
+  }
+}
+
+
+// ============================
+// 🔹 WEBHOOK ENDPOINT
+// ============================
+router.post("/webhook", async (req, res) => {
+  try {
+    console.log("Incoming webhook:", JSON.stringify(req.body, null, 2));
+
+    const messageData = req.body.messages?.[0];
+
+    // Ignore if no message
+    if (!messageData) {
+      return res.sendStatus(200);
+    }
+
+    const userMessage = messageData.text?.body;
+    const from = messageData.from;
+
+    // Ignore non-text messages
+    if (!userMessage) {
+      return res.sendStatus(200);
+    }
+
+    console.log("User:", from, "| Message:", userMessage);
+
+    // Entry trigger
+    if (userMessage === "AI-Academy") {
+      await sendMessage(
+        from,
+        "Thank you for reaching out to the AI Academy! How can I help you today?"
+      );
+      return res.sendStatus(200);
+    }
+
+    // Get AI response
+    const reply = await getAIResponse(userMessage);
+
+    console.log("Bot reply:", reply);
+
+    // Send back to user
+    await sendMessage(from, reply);
+
+    return res.sendStatus(200);
+
+  } catch (error) {
+    console.error("Webhook ERROR:", error);
+    return res.sendStatus(500);
+  }
+});
+
+
+// ============================
+// 🔹 OPTIONAL TEST ROUTE
+// ============================
 router.post("/chat", async (req, res) => {
   try {
     const userMessage = req.body.message;
@@ -37,49 +146,12 @@ router.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
-    // Entry message
-    if (userMessage === "AI-Academy") {
-      return res.json({
-        reply: "Thank you for reaching out to the AI Academy! How can I help you today?",
-      });
-    }
+    const reply = await getAIResponse(userMessage);
 
-    // Groq using OpenAI SDK (chat format)
-    const response = await client.chat.completions.create({
-      model: "llama-3.1-8b-instant",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are an AI Academy assistant. Answer ONLY using the provided context. If the answer is not in the context, say you don't know.",
-        },
-        {
-          role: "system",
-          content: COURSE_CONTEXT,
-        },
-        {
-          role: "user",
-          content: userMessage,
-        },
-      ],
-    });
-
-    console.log(JSON.stringify(response, null, 2));
-
-    let botReply = "I’m not sure based on available information.";
-
-    if (response.choices && response.choices.length > 0) {
-      const content = response.choices[0].message?.content;
-      if (content && content.trim() !== "") {
-        botReply = content;
-      }
-    }
-
-    return res.json({ reply: botReply });
-
-  } catch (error) {
-    console.error("ERROR:", error);
-    return res.status(500).json({ error: "Something went wrong" });
+    return res.json({ reply });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
   }
 });
 
